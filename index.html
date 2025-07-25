@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Mayan Calendar Simulator</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: sans-serif; }
+  #info { position: absolute; top: 10px; left: 10px; }
+  #dateInput { position: absolute; top: 10px; right: 10px; }
+</style>
+</head>
+<body>
+<div id="info"></div>
+<input type="date" id="dateInput" />
+<script src="three.min.js"></script>
+<script src="OrbitControls.js"></script>
+<script src="CSS2DRenderer.js"></script>
+<script>
+const BASE_JDN = 584283; // 0.0.0.0.0 => 11 August 3114 BCE
+const tzNames = [
+  "Imix'", "Ik'", "Ak'b'al", "K'an", "Chikchan", "Kimi", "Manik'", "Lamat",
+  "Muluk", "Ok", "Chuwen", "Eb'", "B'en", "Ix", "Men", "K'ib",
+  "Kaban", "Etz'nab'", "Kawak", "Ajaw"
+];
+const haabMonths = [
+  "Pop", "Wo'", "Sip", "Sotz'", "Sek", "Xul", "Yaxk'in", "Mol",
+  "Ch'en", "Yax", "Sak'", "Keh", "Mak", "K'ank'in", "Muwan",
+  "Pax", "K'ayab", "Kumk'u", "Wayeb"
+];
+
+let scene, camera, renderer, labelRenderer, controls;
+let tzGroup, haabGroup;
+let currentJdn;
+const stepT = 2 * Math.PI / 260;
+const stepH = 2 * Math.PI / 365;
+
+init();
+
+function createTextSprite(text) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const context = canvas.getContext('2d');
+  context.fillStyle = 'white';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.font = '24px sans-serif';
+  context.fillText(text, 32, 32);
+  const texture = new THREE.CanvasTexture(canvas);
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(0.8, 0.8, 0.8);
+  return sprite;
+}
+
+function createTzolkinRing() {
+  const group = new THREE.Group();
+  const radius = 5;
+  for (let i = 0; i < 260; i++) {
+    const number = i % 13 + 1;
+    const signIndex = i % 20;
+    const label = number + ' ' + tzNames[signIndex];
+    const sprite = createTextSprite(label);
+    const angle = i * stepT;
+    sprite.position.set(Math.cos(angle) * radius, Math.sin(angle) * radius, 0);
+    group.add(sprite);
+  }
+  const ringGeo = new THREE.RingGeometry(radius - 0.3, radius + 0.3, 64);
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.2 });
+  const ring = new THREE.Mesh(ringGeo, ringMat);
+  ring.rotation.x = Math.PI / 2;
+  group.add(ring);
+  return group;
+}
+
+function createHaabRing() {
+  const group = new THREE.Group();
+  const radius = 8;
+  for (let i = 0; i < 365; i++) {
+    const month = Math.floor(i / 20);
+    const day = i % 20;
+    let label;
+    if (month < 18) {
+      label = day + ' ' + haabMonths[month];
+    } else {
+      label = day + ' ' + haabMonths[18];
+    }
+    const sprite = createTextSprite(label);
+    const angle = i * stepH;
+    sprite.position.set(Math.cos(angle) * radius, Math.sin(angle) * radius, 0);
+    group.add(sprite);
+  }
+  const ringGeo = new THREE.RingGeometry(radius - 0.3, radius + 0.3, 64);
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.2 });
+  const ring = new THREE.Mesh(ringGeo, ringMat);
+  ring.rotation.x = Math.PI / 2;
+  group.add(ring);
+  return group;
+}
+
+function toJdn(year, month, day) {
+  if (month <= 2) { year -= 1; month += 12; }
+  const A = Math.floor(year / 100);
+  const B = 2 - A + Math.floor(A / 4);
+  return Math.floor(365.25 * (year + 4716)) + Math.floor(30.6001 * (month + 1)) + day + B - 1524;
+}
+
+function jdnToDate(jdn) {
+  let a = jdn + 32044;
+  let b = Math.floor((4 * a + 3) / 146097);
+  let c = a - Math.floor(146097 * b / 4);
+  let d = Math.floor((4 * c + 3) / 1461);
+  let e = c - Math.floor(1461 * d / 4);
+  let m = Math.floor((5 * e + 2) / 153);
+  let day = e - Math.floor((153 * m + 2) / 5) + 1;
+  let month = m + 3 - 12 * Math.floor(m / 10);
+  let year = b * 100 + d - 4800 + Math.floor(m / 10);
+  return { year, month, day };
+}
+
+function jdnToTzolkin(jdn) {
+  const number = ((jdn + 5) % 13) + 1;
+  const signIndex = (jdn + 16) % 20;
+  return { number, signIndex };
+}
+
+function jdnToHaab(jdn) {
+  const index = (jdn + 65) % 365;
+  const month = Math.floor(index / 20);
+  const day = index % 20;
+  return { month, day, index };
+}
+
+function updateInfo() {
+  const tz = jdnToTzolkin(currentJdn);
+  const ha = jdnToHaab(currentJdn);
+  const tzName = tzNames[tz.signIndex];
+  const haName = haabMonths[ha.month];
+  document.getElementById('info').textContent =
+    `Tzolkin: ${tz.number} ${tzName} \u2013 Haab: ${ha.day} ${haName}`;
+}
+
+function updateDateInput() {
+  const d = jdnToDate(currentJdn);
+  const yyyy = String(d.year).padStart(4, '0');
+  const mm = String(d.month).padStart(2, '0');
+  const dd = String(d.day).padStart(2, '0');
+  document.getElementById('dateInput').value = `${yyyy}-${mm}-${dd}`;
+}
+
+function updateRings() {
+  const tzIndex = (currentJdn - BASE_JDN) % 260;
+  const haIndex = (currentJdn - BASE_JDN) % 365;
+  tzGroup.rotation.z = -tzIndex * stepT;
+  haabGroup.rotation.z = -haIndex * stepH;
+  updateInfo();
+  updateDateInput();
+}
+
+function init() {
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+  camera.position.z = 15;
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  labelRenderer = new THREE.CSS2DRenderer();
+  labelRenderer.setSize(window.innerWidth, window.innerHeight);
+  labelRenderer.domElement.style.position = 'absolute';
+  labelRenderer.domElement.style.top = '0';
+  labelRenderer.domElement.style.pointerEvents = 'none';
+  document.body.appendChild(labelRenderer.domElement);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+
+  tzGroup = createTzolkinRing();
+  haabGroup = createHaabRing();
+
+  scene.add(tzGroup);
+  scene.add(haabGroup);
+
+  currentJdn = toJdn(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, new Date().getUTCDate());
+  updateRings();
+
+  window.addEventListener('resize', onWindowResize);
+  renderer.domElement.addEventListener('pointerdown', onPointerDown);
+  renderer.domElement.addEventListener('pointermove', onPointerMove);
+  renderer.domElement.addEventListener('pointerup', onPointerUp);
+  renderer.domElement.addEventListener('pointerleave', onPointerUp);
+  document.getElementById('dateInput').addEventListener('change', onDateChange);
+
+  animate();
+}
+
+function onWindowResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  labelRenderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+let drag = null;
+function getMousePos(event) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const x = event.clientX - rect.left - rect.width / 2;
+  const y = event.clientY - rect.top - rect.height / 2;
+  return { x, y, radius: Math.hypot(x, y), angle: Math.atan2(y, x) };
+}
+
+function onPointerDown(event) {
+  const pos = getMousePos(event);
+  const tzRadius = 5;
+  const haRadius = 8;
+  if (pos.radius > tzRadius - 0.5 && pos.radius < tzRadius + 0.5) {
+    drag = { ring: 'tz', startAngle: pos.angle, startRot: tzGroup.rotation.z };
+  } else if (pos.radius > haRadius - 0.5 && pos.radius < haRadius + 0.5) {
+    drag = { ring: 'ha', startAngle: pos.angle, startRot: haabGroup.rotation.z };
+  }
+}
+
+function onPointerMove(event) {
+  if (!drag) return;
+  const pos = getMousePos(event);
+  const delta = pos.angle - drag.startAngle;
+  if (drag.ring === 'tz') {
+    tzGroup.rotation.z = drag.startRot + delta;
+  } else {
+    haabGroup.rotation.z = drag.startRot + delta;
+  }
+}
+
+function onPointerUp() {
+  if (!drag) return;
+  const ring = drag.ring === 'tz' ? tzGroup : haabGroup;
+  const step = drag.ring === 'tz' ? stepT : stepH;
+  const count = drag.ring === 'tz' ? 260 : 365;
+  const oldIndex = (currentJdn - BASE_JDN) % count;
+  let newIndex = Math.round(-ring.rotation.z / step) % count;
+  if (newIndex < 0) newIndex += count;
+  let delta = newIndex - oldIndex;
+  if (delta > count / 2) delta -= count;
+  if (delta < -count / 2) delta += count;
+  currentJdn += delta;
+  updateRings();
+  drag = null;
+}
+
+function onDateChange() {
+  const value = document.getElementById('dateInput').value;
+  const [y, m, d] = value.split('-').map(Number);
+  currentJdn = toJdn(y, m, d);
+  updateRings();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+}
+</script>
+</body>
+</html>
